@@ -42,6 +42,7 @@ function convert(promise, inherit) {
  * @property {String} image.type - The image type.
  * @property {Number} image.quality - The image quality.
  * @property {Boolean} enableLinks - Whether to enable links.
+ * @property {Number} pagesPerCanvas - The number of pages to generate per canvas.
  * @property {Object} html2canvas - The html2canvas options.
  * @property {Object} jsPDF - The jsPDF options.
  */
@@ -103,6 +104,7 @@ Worker.template = {
     margin: [0,0,0,0],
     image: { type: 'jpeg', quality: 0.95 },
     enableLinks: true,
+    pagesPerCanvas: 1,
     html2canvas: {},
     jsPDF: {},
     documentProperties: {}
@@ -284,10 +286,8 @@ Worker.prototype.toCanvases = function toCanvases() {
     const opt = this.opt;
     const root = this.prop.container;
     const pxPageWidth = this.prop.pageSize.inner.px.width;
-    const pxPageHeight = this.prop.pageSize.inner.px.height;
-
+    const pxPageHeight = this.prop.pageSize.inner.px.height * opt.pagesPerCanvas;
     const clientBoundingRect = root.getBoundingClientRect();
-
     const pxFullHeight = clientBoundingRect.height;
     const nPages = Math.ceil(pxFullHeight / pxPageHeight);
 
@@ -301,6 +301,13 @@ Worker.prototype.toCanvases = function toCanvases() {
     }
 
     for (let page = 0; page < nPages; page++) {
+      // Trim the final page to reduce file size / blank pages.
+      if (page === nPages - 1) {
+        const height = pxFullHeight - (pxPageHeight * page);
+        opt.html2canvas.height = height;
+        opt.html2canvas.windowHeight = height;
+      }
+
       const options = Object.assign({}, opt.html2canvas);
       delete options.onrendered;
 
@@ -336,12 +343,27 @@ Worker.prototype.toImgs = function toImgs() {
 
     // This function should still work even if .toCanvas was run previously instead of .toCanvases
     const canvases = this.prop.canvas instanceof Array ? this.prop.canvas : [this.prop.canvas];
-
     for (const canvas of canvases) {
-      const img = document.createElement('img');
-      const imgData = canvas.toDataURL('image/' + this.opt.image.type, this.opt.image.quality);
-      img.src = imgData;
-      this.prop.imgs.push(img);
+      // Create a one-page canvas to split up the full image.
+      const pxPageHeight = Math.floor(canvas.width * this.prop.pageSize.inner.ratio);
+      const pageCanvas = document.createElement('canvas');
+      const pageCtx = pageCanvas.getContext('2d');
+      pageCanvas.width = canvas.width;
+      pageCanvas.height = pxPageHeight;
+      
+      const pages = Math.ceil((canvas.height / (this.opt.html2canvas.scale ?? window.devicePixelRatio)) / this.prop.pageSize.inner.px.height);
+      for (let page = 0; page < pages; page++) {
+        const w = pageCanvas.width;
+        const h = pageCanvas.height;
+        pageCtx.fillStyle = 'white';
+        pageCtx.fillRect(0, 0, w, h);
+        pageCtx.drawImage(canvas, 0, page * pageCanvas.height, w, h, 0, 0, w, h);
+  
+        const img = document.createElement('img');
+        const imgData = pageCanvas.toDataURL('image/' + this.opt.image.type, this.opt.image.quality);
+        img.src = imgData;
+        this.prop.imgs.push(img);
+      }
     }
   });
 };
@@ -364,12 +386,12 @@ Worker.prototype.toPdf = function toPdf() {
 
     // Initialize the PDF.
     this.prop.pdf = this.prop.pdf || new jsPDF(this.opt.jsPDF);
-
-    for (const img of imgs) {
-      this.prop.pdf.addPage();
+    for (const [idx, img] of imgs.entries()) {
+      if (idx > 0) { // Seems to be initialized with a page.
+        this.prop.pdf.addPage();
+      }
       this.prop.pdf.addImage(img.src, this.opt.image.type, this.opt.margin[1], this.opt.margin[0], this.prop.pageSize.inner.width, this.prop.pageSize.inner.height);
     }
-
   });
 };
 
