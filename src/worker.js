@@ -1,11 +1,12 @@
 import { jsPDF } from 'jspdf';
 import * as html2canvas from 'html2canvas';
+import canvasSize from 'canvas-size';
 import { objType, createElement, cloneNode, toPx } from './utils.js';
 
 /**
  * Converts/casts promises into Workers
- * @param {Promise} promise 
- * @param {*} [inherit]  prototype to inherit from for the new worker, defaults to Worker.prototype 
+ * @param {Promise} promise
+ * @param {*} [inherit]  prototype to inherit from for the new worker, defaults to Worker.prototype
  * @returns {worker}
  */
 function convert(promise, inherit) {
@@ -89,7 +90,8 @@ Worker.template = {
     canvas: null,
     img: null,
     pdf: null,
-    pageSize: null
+    pageSize: null,
+    canvasSize: null,
   },
   progress: {
     val: 0,
@@ -117,8 +119,8 @@ Worker.template = {
 /**
  * Sets the source (HTML string or element) for the PDF
  * Adds a promise to the promise chain, which modifies calls this.set() to update src, canvas, or img.
- * @param {*} src 
- * @param {"string"|"element"|"canvas"|"img"} [type] 
+ * @param {*} src
+ * @param {"string"|"element"|"canvas"|"img"} [type]
  * @returns {worker} returns itself for chaining.
  */
 Worker.prototype.from = function from(src, type) {
@@ -145,7 +147,7 @@ Worker.prototype.from = function from(src, type) {
 
 /**
  * Wrapper for toContainer, toCanvas, toImg, and toPdf.
- * 
+ *
  * How the 'to' system works:
  * To create the pdf, we create a container element, convert it to canvases/a canvas, convert the canvas(es) to image(s), and then convert the image(s) to a pdf.
  * Therefore, .toContainer, .toCanvases/.toCanvas, .toImgs/.toImg, and .toPdf must all be called, in that order.
@@ -153,7 +155,7 @@ Worker.prototype.from = function from(src, type) {
  * Instead, there is a "prereq" system:
  * Each function has a list of prereq functions, which are passed into the .thenList() function, and THEN the main function is passed into .then().
  * Each prereq function checks to see if its condition is met, and if not, it returns a promise to run the necessary function, which gets put on the chain by .thenList
- * 
+ *
  * @param {"container"|"canvases"|"imgs"|"canvas"|"img"|"pdf"} target
  * @returns {worker} returns itself for chaining.
  */Worker.prototype.to = function to(target) {
@@ -278,13 +280,15 @@ Worker.prototype.toImg = function toImg() {
 Worker.prototype.toCanvases = function toCanvases() {
   // Set up function prerequisites.
   const prereqs = [
-    function checkContainer() { return document.body.contains(this.prop.container) || this.toContainer(); }
+    function checkContainer() { return document.body.contains(this.prop.container) || this.toContainer(); },
+    function checkCanvasSize() { return this.prop.canvasSize || this.setCanvasSize(); }
   ];
 
   // Fulfill prereqs then create the canvases.
   return this.thenList(prereqs).then(async function toCanvases_main() {
     const opt = this.opt;
     const root = this.prop.container;
+    const canvasSize = this.prop.canvasSize;
     const pxPageWidth = this.prop.pageSize.inner.px.width;
     const pxPageHeight = this.prop.pageSize.inner.px.height * opt.pagesPerCanvas;
     const clientBoundingRect = root.getBoundingClientRect();
@@ -350,7 +354,7 @@ Worker.prototype.toImgs = function toImgs() {
       const pageCtx = pageCanvas.getContext('2d');
       pageCanvas.width = canvas.width;
       pageCanvas.height = pxPageHeight;
-      
+
       const pages = Math.ceil((canvas.height / (this.opt.html2canvas.scale ?? window.devicePixelRatio)) / this.prop.pageSize.inner.px.height);
       for (let page = 0; page < pages; page++) {
         const w = pageCanvas.width;
@@ -358,7 +362,7 @@ Worker.prototype.toImgs = function toImgs() {
         pageCtx.fillStyle = 'white';
         pageCtx.fillRect(0, 0, w, h);
         pageCtx.drawImage(canvas, 0, page * pageCanvas.height, w, h, 0, 0, w, h);
-  
+
         const img = document.createElement('img');
         const imgData = pageCanvas.toDataURL('image/' + this.opt.image.type, this.opt.image.quality);
         img.src = imgData;
@@ -402,8 +406,8 @@ Worker.prototype.toPdf = function toPdf() {
  * Wrapper for outputPdf and outputImg.
  * @param {"arraybuffer"|"blob"|"bloburi"|"bloburl"|"datauristring"|"dataurlstring"|"dataurlnewwindow"|"datauri"|"dataurl"|"img"} type
  * @param {*} options if pdf - options for jsPDF.output, if img, unused.
- * @param {"img"|"image"|"pdf"} src 
- * @returns {worker} returns itself for chaining.  
+ * @param {"img"|"image"|"pdf"} src
+ * @returns {worker} returns itself for chaining.
  */
 Worker.prototype.output = function output(type, options, src) {
   // Redirect requests to the correct function (outputPdf / outputImg).
@@ -420,7 +424,7 @@ Worker.prototype.output = function output(type, options, src) {
  * Make sure the pdf is available, then call the jsPDF output function.
  * @param {"arraybuffer"|"blob"|"bloburi"|"bloburl"|"datauristring"|"dataurlstring"|"dataurlnewwindow"|"datauri"|"dataurl"} type
  * @param {*} options options for jsPDF.output
- * @returns {worker} returns itself for chaining.  
+ * @returns {worker} returns itself for chaining.
  */
 Worker.prototype.outputPdf = function outputPdf(type, options) {
   // Set up function prerequisites.
@@ -444,7 +448,7 @@ Worker.prototype.outputPdf = function outputPdf(type, options) {
  * Add a function to the promise chain that will return the image data
  * @param {"datauristring"|"dataurlstring"|"datauri"|"dataurl"|"img"} type desired output type
  * @param {*} options unused, but included for consistency with outputPdf
- * @returns {worker} returns itself for chaining. 
+ * @returns {worker} returns itself for chaining.
  */
 Worker.prototype.outputImg = function outputImg(type, options) {
   // Set up function prerequisites.
@@ -623,11 +627,23 @@ Worker.prototype.setPageSize = function setPageSize(pageSize) {
 }
 
 
+Worker.prototype.setCanvasSize = function setCanvasSize() {
+  return this.thenExternal(function getCanvasSize_main() {
+    return canvasSize.maxArea({
+      useWorker: true,
+    });
+  }).then(function (canvasSize) {
+    return this.then(function setCanvasSize_main() {
+      this.props.canvasSize = canvasSize;
+    });
+  })
+}
+
 /**
  * Update the progress properties of the worker - we take the entire promise chain and after each one resolves we update the progress properties with how far along the chain we are.
  * @param {number} val current step number
  * @param {*} state ??
- * @param {number} n total number of steps 
+ * @param {number} n total number of steps
  */
 Worker.prototype.updateProgress = function updateProgress(val, state, n) {
   if (val) this.progress.val += val;
@@ -682,8 +698,8 @@ Worker.prototype.then = function then(onFulfilled, onRejected) {
 
 /**
  * the core of the .then method - this is what gets called instead of the native Promise .then
- * @param {Function} onFulfilled 
- * @param {Function} onRejected 
+ * @param {Function} onFulfilled
+ * @param {Function} onRejected
  * @param {Function} [thenBase]  optional replacement for Promise.prototype.then
  * @returns {worker} returns itself for chaining.
  */
@@ -734,8 +750,8 @@ Worker.prototype.thenList = function thenList(fns) {
 
 /**
  * Bind `this` to the promise handler, call `catch`, and return a Worker.
- * @param {Function} onRejected 
- * @returns {worker} 
+ * @param {Function} onRejected
+ * @returns {worker}
  */
 Worker.prototype['catch'] = function (onRejected) {
   if (onRejected)   { onRejected = onRejected.bind(this); }
@@ -746,7 +762,7 @@ Worker.prototype['catch'] = function (onRejected) {
 
 /**
  * Call `catch` and return a standard promise (exits the Worker chain).
- * @param {Function} onRejected 
+ * @param {Function} onRejected
  * @returns {Promise}
  */
 Worker.prototype.catchExternal = function catchExternal(onRejected) {
@@ -756,7 +772,7 @@ Worker.prototype.catchExternal = function catchExternal(onRejected) {
 
 /**
  * Throw the error in the Promise chain.
- * @param {string} msg 
+ * @param {string} msg
  * @returns {worker} returns itself for chaining (although in this case 'chaining' just means it will skip ahead to any .catch once it throws the error)
  */
 Worker.prototype.error = function error(msg) {
